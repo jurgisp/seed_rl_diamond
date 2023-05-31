@@ -92,7 +92,31 @@ class ImpalaDeep(tf.Module):
     return self._core.get_initial_state(batch_size=batch_size, dtype=tf.float32)
 
   def _torso(self, prev_action, env_output):
-    reward, _, frame, _, _ = env_output
+    reward, _, obs, _, _ = env_output
+    if not isinstance(obs, dict):
+      raise ValueError('Expecting dictionary observation, got:' + str(obs))
+
+    print('Compiling newtork with observations:')
+    image_obses = []
+    vector_obses = []
+    for key, value in obs.items():
+      if len(value.shape) == 4:
+        image_obses.append(value)
+        print('- image :', key, value.shape, value.dtype)
+      elif len(value.shape) == 2:
+        vector_obses.append(value)
+        print('- vector:', key, value.shape, value.dtype)
+      elif len(value.shape) == 1:
+        vector_obses.append(tf.expand_dims(value, axis=-1))
+        print('- scalar:', key, value.shape, value.dtype)
+      else:
+        print('- other :', key, value.shape, value.dtype)
+
+    if len(image_obses) != 1:
+      raise ValueError('Expecting exactly one image observation.')
+    frame = image_obses[0]
+    vector_obs = tf.concat(vector_obses, axis=1)
+    print('Full vector obs shape:', vector_obs.shape)
 
     # Convert to floats.
     frame = tf.cast(frame, tf.float32)
@@ -111,7 +135,9 @@ class ImpalaDeep(tf.Module):
     # Append clipped last reward and one hot last action.
     clipped_reward = tf.expand_dims(tf.clip_by_value(reward, -1, 1), -1)
     one_hot_prev_action = tf.one_hot(prev_action, self._num_actions)
-    return tf.concat([conv_out, clipped_reward, one_hot_prev_action], axis=1)
+    vector_obs = tf.concat([vector_obs, clipped_reward, one_hot_prev_action], axis=1)
+
+    return tf.concat([conv_out, vector_obs], axis=1)
 
   def _head(self, core_output):
     policy_logits = self._policy_logits(core_output)
@@ -160,7 +186,7 @@ class ImpalaDeep(tf.Module):
     for input_, d in zip(tf.unstack(torso_outputs), tf.unstack(done)):
       # If the episode ended, the core state should be reset before the next.
       core_state = tf.nest.map_structure(
-          lambda x, y, d=d: tf.where(  
+          lambda x, y, d=d: tf.where(
               tf.reshape(d, [d.shape[0]] + [1] * (x.shape.rank - 1)), x, y),
           initial_core_state,
           core_state)
